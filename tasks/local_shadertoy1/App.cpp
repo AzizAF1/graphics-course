@@ -3,6 +3,21 @@
 #include <etna/Etna.hpp>
 #include <etna/GlobalContext.hpp>
 #include <etna/PipelineManager.hpp>
+#include <etna/DescriptorSet.hpp>
+
+#include <chrono>
+
+
+namespace
+{
+struct PushConstants
+{
+  glm::vec2 iResolution; // pixels
+  float iTime;           // seconds
+  float _pad0;           // padding for std140-ish alignment
+  glm::vec4 iMouse;      // (x,y,clickX,clickY)
+};
+} // namespace
 
 
 App::App()
@@ -75,11 +90,31 @@ App::App()
   }
 
   // TODO: Initialize any additional resources you require here!
+  startTime = std::chrono::steady_clock::now();
+
+  // Load shader + create compute pipeline
+  etna::create_program("toy", {LOCAL_SHADERTOY1_SHADERS_ROOT "toy.comp.spv"});
+  toyPipeline = etna::get_context().getPipelineManager().createComputePipeline("toy", {});
+
+  // Create storage image for compute shader output
+  recreateStorageImage();
 }
 
 App::~App()
 {
   ETNA_CHECK_VK_RESULT(etna::get_context().getDevice().waitIdle());
+}
+
+void App::recreateStorageImage()
+{
+  auto& ctx = etna::get_context();
+
+  storageImage = ctx.createImage(etna::Image::CreateInfo{
+    .extent = vk::Extent3D{resolution.x, resolution.y, 1},
+    .format = vk::Format::eR8G8B8A8Unorm,
+    .imageUsage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc,
+    .name = "toy_storage_image",
+  });
 }
 
 void App::run()
@@ -140,6 +175,92 @@ void App::drawFrame()
 
 
       // TODO: Record your commands here!
+      ETNA_VERIFY(storageImage.has_value());
+      ETNA_VERIFY(toyPipeline.has_value());
+
+      // 1) storage image: compute write in GENERAL
+      etna::set_state(
+        currentCmdBuf,
+        storageImage->get(),
+        vk::PipelineStageFlagBits2::eComputeShader,
+        vk::AccessFlagBits2::eShaderWrite,
+        vk::ImageLayout::eGeneral,
+        vk::ImageAspectFlagBits::eColor);
+      etna::flush_barriers(currentCmdBuf);
+
+      // 2) descriptor set: bind storage image to binding=0
+      auto toyInfo = etna::get_shader_program("toy");
+
+      auto set = etna::create_descriptor_set(
+        toyInfo.getDescriptorLayoutId(0),
+        currentCmdBuf,
+        {
+          etna::Binding{0, storageImage->genBinding(vk::Sampler{}, vk::ImageLayout::eGeneral, {})},
+        });
+
+      vk::DescriptorSet vkSet = set.getVkSet();
+
+      currentCmdBuf.bindPipeline(vk::PipelineBindPoint::eCompute, toyPipeline->getVkPipeline());
+      currentCmdBuf.bindDescriptorSets(
+        vk::PipelineBindPoint::eCompute,
+        toyPipeline->getVkPipelineLayout(),
+        0,
+        1,
+        &vkSet,
+        0,
+        nullptr);
+
+      // 3) push constants: resolution + time
+      const auto now = std::chrono::steady_clock::now();
+      const float timeSec =
+        std::chrono::duration_cast<std::chrono::duration<float>>(now - startTime).count();
+
+      PushConstants pc{};
+      pc.iResolution = glm::vec2(float(resolution.x), float(resolution.y));
+      pc.iTime = timeSec;
+      pc.iMouse = glm::vec4(0, 0, 0, 0);
+
+      currentCmdBuf.pushConstants(
+        toyPipeline->getVkPipelineLayout(),
+        vk::ShaderStageFlagBits::eCompute,
+        0,
+        sizeof(PushConstants),
+        &pc);
+
+      // 4) dispatch
+      const uint32_t groupX = (resolution.x + 31u) / 32u;
+      const uint32_t groupY = (resolution.y + 31u) / 32u;
+      currentCmdBuf.dispatch(groupX, groupY, 1);
+
+      // 5) storage image: transfer src for blit
+      etna::set_state(
+        currentCmdBuf,
+        storageImage->get(),
+        vk::PipelineStageFlagBits2::eTransfer,
+        vk::AccessFlagBits2::eTransferRead,
+        vk::ImageLayout::eTransferSrcOptimal,
+        vk::ImageAspectFlagBits::eColor);
+      etna::flush_barriers(currentCmdBuf);
+
+      // 6) blit storage -> backbuffer
+      vk::ImageBlit blit{};
+      blit.srcSubresource = vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+      blit.dstSubresource = vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+
+      blit.srcOffsets[0] = vk::Offset3D{0, 0, 0};
+      blit.srcOffsets[1] = vk::Offset3D{int32_t(resolution.x), int32_t(resolution.y), 1};
+
+      blit.dstOffsets[0] = vk::Offset3D{0, 0, 0};
+      blit.dstOffsets[1] = vk::Offset3D{int32_t(resolution.x), int32_t(resolution.y), 1};
+
+      currentCmdBuf.blitImage(
+        storageImage->get(),
+        vk::ImageLayout::eTransferSrcOptimal,
+        backbuffer,
+        vk::ImageLayout::eTransferDstOptimal,
+        1,
+        &blit,
+        vk::Filter::eNearest);
 
 
       // At the end of "rendering", we are required to change how the pixels of the
@@ -187,5 +308,8 @@ void App::drawFrame()
       .numFramesInFlight = static_cast<uint32_t>(commandManager->getCmdBufferCount()),
     });
     ETNA_VERIFY((resolution == glm::uvec2{w, h}));
+
+    // Recreate storage image too (safe even if resolution didn't change)
+    recreateStorageImage();
   }
 }

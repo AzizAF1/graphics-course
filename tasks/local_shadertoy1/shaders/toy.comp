@@ -4,15 +4,247 @@ layout(local_size_x = 32, local_size_y = 32) in;
 
 layout(binding = 0, rgba8) uniform image2D resultImage;
 
+layout(push_constant) uniform Push
+{
+    vec2 iResolution; // (w,h)
+    float iTime;
+    float _pad0;
+    vec4 iMouse;
+} pc;
+
+vec3 iResolution = vec3(pc.iResolution, 1.0);
+float iTime = pc.iTime;
+vec4 iMouse = pc.iMouse;
+
+// -------------------- YOUR SHADERTOY CODE --------------------
+
+float sdSphere(vec3 p, float r)
+{
+    return length(p) - r;
+}
+
+float sdPlane(vec3 p, vec3 n, float h)
+{
+    // n - нормаль плоскости
+    // dot(p, n) + h = 0
+    return dot(p, n) + h;
+}
+
+// бокс для разнообразия
+float sdBox(vec3 p, vec3 b)
+{
+    // b - полуразмеры по осям (x, y, z)
+    vec3 q = abs(p) - b;
+    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
+}
+
+// Главный SDF сцены
+float mapScene(vec3 p, out int materialID)
+{
+    float t = iTime;
+    vec3 spherePos = vec3(sin(t) * 1.0, 0.5, 0.0);
+    float dSphere = sdSphere(p - spherePos, 0.7);
+
+    float dPlane = sdPlane(p, vec3(0.0, 1.0, 0.0), 1.0); // y = -1
+
+    vec3 boxPos = vec3(-1.5, -0.2, 0.5);
+    float dBox = sdBox(p - boxPos, vec3(0.4, 0.8, 0.4));
+
+    float d = dSphere;
+    materialID = 1; // 1 = сфера
+
+    if (dPlane < d)
+    {
+        d = dPlane;
+        materialID = 2; // 2 = пол
+    }
+
+    if (dBox < d)
+    {
+        d = dBox;
+        materialID = 3; // 3 = бокс
+    }
+
+    return d;
+}
+
+float mapScene(vec3 p)
+{
+    int dummy;
+    return mapScene(p, dummy);
+}
+
+vec3 getNormal(vec3 p)
+{
+    float eps = 0.001;
+    vec2 e = vec2(1.0, -1.0);
+
+    return normalize(
+        e.xyy * mapScene(p + e.xyy * eps) +
+        e.yyx * mapScene(p + e.yyx * eps) +
+        e.yxy * mapScene(p + e.yxy * eps) +
+        e.xxx * mapScene(p + e.xxx * eps)
+    );
+}
+
+float rayMarch(vec3 ro, vec3 rd, out vec3 pos, out int materialID)
+{
+    float t = 0.0;
+    float maxDist = 100.0;
+    const int MAX_STEPS = 128;
+    const float EPS = 0.001;
+
+    for (int i = 0; i < MAX_STEPS; i++)
+    {
+        pos = ro + rd * t;
+        float d = mapScene(pos, materialID);
+
+        if (d < EPS)
+        {
+            return t; // попали в поверхность
+        }
+
+        t += d;
+
+        if (t > maxDist)
+        {
+            break; // улетели слишком далеко
+        }
+    }
+
+    return -1.0; // ничего не нашли
+}
+
+float softShadow(vec3 ro, vec3 rd)
+{
+    float res = 1.0;
+    float t = 0.02;
+    float maxDist = 20.0;
+    const int MAX_STEPS = 64;
+
+    for (int i = 0; i < MAX_STEPS; i++)
+    {
+        vec3 p = ro + rd * t;
+        float h = mapScene(p);
+        if (h < 0.001)
+            return 0.0;
+        res = min(res, 10.0 * h / t);
+        t += clamp(h, 0.02, 0.5);
+        if (t > maxDist) break;
+    }
+    return clamp(res, 0.0, 1.0);
+}
+
+vec3 getMaterialColor(int matID, vec3 pos)
+{
+    if (matID == 1) // сфера
+    {
+        // Градиент по высоте
+        float h = pos.y * 0.5 + 0.5;
+        return mix(vec3(0.2, 0.4, 1.0), vec3(1.0, 0.2, 0.4), h);
+    }
+    else if (matID == 2) // пол
+    {
+        // Чекерборд
+        float s = step(0.5, fract(pos.x * 0.5) + fract(pos.z * 0.5));
+        return mix(vec3(0.2), vec3(0.8), s);
+    }
+    else if (matID == 3) // бокс
+    {
+        return vec3(0.3, 0.9, 0.4);
+    }
+
+    return vec3(1.0);
+}
+
+vec3 phongLighting(vec3 pos, vec3 normal, vec3 viewDir, int matID)
+{
+    vec3 baseColor = getMaterialColor(matID, pos);
+
+    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
+    vec3 lightColor = vec3(1.0);
+
+    float ambient = 0.1;
+
+    float diff = max(dot(normal, lightDir), 0.0);
+
+    vec3 halfDir = normalize(lightDir + viewDir);
+    float spec = pow(max(dot(normal, halfDir), 0.0), 32.0);
+
+    float shadow = softShadow(pos + normal * 0.01, lightDir);
+
+    vec3 color = vec3(0.0);
+    color += ambient * baseColor;
+    color += diff * baseColor * lightColor * shadow;
+    color += spec * lightColor * shadow;
+
+    return color;
+}
+
+vec3 getRayDir(vec2 uv, vec3 ro, vec3 target, float fov)
+{
+    vec3 forward = normalize(target - ro);
+    vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), forward));
+    vec3 up = cross(forward, right);
+
+    return normalize(forward * fov + uv.x * right + uv.y * up);
+}
+
+void mainImage(out vec4 fragColor, in vec2 fragCoord)
+{
+    vec2 uv = (fragCoord - 0.5 * iResolution.xy) / iResolution.y;
+
+    vec3 ro = vec3(0.0, 0.5, 4.0);       // позиция камеры
+    vec3 target = vec3(0.0, 0.0, 0.0);   // куда смотрим
+    float fov = 1.5;
+
+    float t = iTime * 0.5;
+    ro.xz = vec2(sin(t), cos(t)) * 4.0;
+
+    vec3 rd = getRayDir(uv, ro, target, fov);
+
+    vec3 pos;
+    int matID;
+    float dist = rayMarch(ro, rd, pos, matID);
+
+    vec3 col;
+
+    if (dist > 0.0)
+    {
+        vec3 normal = getNormal(pos);
+        vec3 viewDir = normalize(ro - pos);
+
+        col = phongLighting(pos, normal, viewDir, matID);
+
+        float fog = exp(-0.05 * dist * dist);
+        vec3 fogColor = vec3(0.1, 0.15, 0.2);
+        col = mix(fogColor, col, fog);
+    }
+    else
+    {
+        float v = 0.5 + 0.5 * rd.y;
+        col = mix(vec3(0.1, 0.1, 0.2), vec3(0.2, 0.4, 0.8), v);
+    }
+
+    col = pow(col, vec3(0.4545)); // гамма-коррекция ~1/2.2
+
+    fragColor = vec4(col, 1.0);
+}
+
+// -------------------- END SHADERTOY CODE --------------------
 
 void main()
 {
   ivec2 uv = ivec2(gl_GlobalInvocationID.xy);
 
-  // TODO: Put your shadertoy code here!
-  // Simple gradient as a test.
-  vec3 color = vec3(vec2(uv) / vec2(1280, 720), 0);
+  if (uv.x >= int(pc.iResolution.x) || uv.y >= int(pc.iResolution.y))
+    return;
 
-  if (uv.x < 1280 && uv.y < 720)
-    imageStore(resultImage, uv, vec4(color, 1));
+  // If your image looks upside-down, uncomment the next line:
+  // uv.y = int(pc.iResolution.y) - 1 - uv.y;
+
+  vec4 color;
+  mainImage(color, vec2(uv) + vec2(0.5));
+
+  imageStore(resultImage, uv, color);
 }
