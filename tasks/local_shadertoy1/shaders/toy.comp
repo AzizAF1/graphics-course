@@ -1,8 +1,9 @@
-#version 430
+#version 450
 
 layout(local_size_x = 32, local_size_y = 32) in;
 
-layout(binding = 0, rgba8) uniform image2D resultImage;
+// IMPORTANT: set=0 to match create_descriptor_set(layoutId(0))
+layout(set = 0, binding = 0, rgba8) uniform image2D resultImage;
 
 layout(push_constant) uniform Push
 {
@@ -12,33 +13,23 @@ layout(push_constant) uniform Push
     vec4 iMouse;
 } pc;
 
-vec3 iResolution = vec3(pc.iResolution, 1.0);
-float iTime = pc.iTime;
-vec4 iMouse = pc.iMouse;
+// Shadertoy-like globals (optional)
+vec3  iResolution = vec3(pc.iResolution, 1.0);
+float iTime       = pc.iTime;
+vec4  iMouse      = pc.iMouse;
 
 // -------------------- YOUR SHADERTOY CODE --------------------
 
-float sdSphere(vec3 p, float r)
-{
-    return length(p) - r;
-}
+float sdSphere(vec3 p, float r) { return length(p) - r; }
 
-float sdPlane(vec3 p, vec3 n, float h)
-{
-    // n - нормаль плоскости
-    // dot(p, n) + h = 0
-    return dot(p, n) + h;
-}
+float sdPlane(vec3 p, vec3 n, float h) { return dot(p, n) + h; }
 
-// бокс для разнообразия
 float sdBox(vec3 p, vec3 b)
 {
-    // b - полуразмеры по осям (x, y, z)
     vec3 q = abs(p) - b;
     return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
 }
 
-// Главный SDF сцены
 float mapScene(vec3 p, out int materialID)
 {
     float t = iTime;
@@ -51,19 +42,10 @@ float mapScene(vec3 p, out int materialID)
     float dBox = sdBox(p - boxPos, vec3(0.4, 0.8, 0.4));
 
     float d = dSphere;
-    materialID = 1; // 1 = сфера
+    materialID = 1;
 
-    if (dPlane < d)
-    {
-        d = dPlane;
-        materialID = 2; // 2 = пол
-    }
-
-    if (dBox < d)
-    {
-        d = dBox;
-        materialID = 3; // 3 = бокс
-    }
+    if (dPlane < d) { d = dPlane; materialID = 2; }
+    if (dBox   < d) { d = dBox;   materialID = 3; }
 
     return d;
 }
@@ -99,20 +81,13 @@ float rayMarch(vec3 ro, vec3 rd, out vec3 pos, out int materialID)
         pos = ro + rd * t;
         float d = mapScene(pos, materialID);
 
-        if (d < EPS)
-        {
-            return t; // попали в поверхность
-        }
+        if (d < EPS) return t;
 
         t += d;
-
-        if (t > maxDist)
-        {
-            break; // улетели слишком далеко
-        }
+        if (t > maxDist) break;
     }
 
-    return -1.0; // ничего не нашли
+    return -1.0;
 }
 
 float softShadow(vec3 ro, vec3 rd)
@@ -126,8 +101,7 @@ float softShadow(vec3 ro, vec3 rd)
     {
         vec3 p = ro + rd * t;
         float h = mapScene(p);
-        if (h < 0.001)
-            return 0.0;
+        if (h < 0.001) return 0.0;
         res = min(res, 10.0 * h / t);
         t += clamp(h, 0.02, 0.5);
         if (t > maxDist) break;
@@ -137,23 +111,20 @@ float softShadow(vec3 ro, vec3 rd)
 
 vec3 getMaterialColor(int matID, vec3 pos)
 {
-    if (matID == 1) // сфера
+    if (matID == 1)
     {
-        // Градиент по высоте
         float h = pos.y * 0.5 + 0.5;
         return mix(vec3(0.2, 0.4, 1.0), vec3(1.0, 0.2, 0.4), h);
     }
-    else if (matID == 2) // пол
+    else if (matID == 2)
     {
-        // Чекерборд
         float s = step(0.5, fract(pos.x * 0.5) + fract(pos.z * 0.5));
         return mix(vec3(0.2), vec3(0.8), s);
     }
-    else if (matID == 3) // бокс
+    else if (matID == 3)
     {
         return vec3(0.3, 0.9, 0.4);
     }
-
     return vec3(1.0);
 }
 
@@ -165,7 +136,6 @@ vec3 phongLighting(vec3 pos, vec3 normal, vec3 viewDir, int matID)
     vec3 lightColor = vec3(1.0);
 
     float ambient = 0.1;
-
     float diff = max(dot(normal, lightDir), 0.0);
 
     vec3 halfDir = normalize(lightDir + viewDir);
@@ -194,8 +164,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 {
     vec2 uv = (fragCoord - 0.5 * iResolution.xy) / iResolution.y;
 
-    vec3 ro = vec3(0.0, 0.5, 4.0);       // позиция камеры
-    vec3 target = vec3(0.0, 0.0, 0.0);   // куда смотрим
+    vec3 ro = vec3(0.0, 0.5, 4.0);
+    vec3 target = vec3(0.0, 0.0, 0.0);
     float fov = 1.5;
 
     float t = iTime * 0.5;
@@ -226,8 +196,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         col = mix(vec3(0.1, 0.1, 0.2), vec3(0.2, 0.4, 0.8), v);
     }
 
-    col = pow(col, vec3(0.4545)); // гамма-коррекция ~1/2.2
-
+    col = pow(col, vec3(0.4545));
     fragColor = vec4(col, 1.0);
 }
 
@@ -235,16 +204,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
 void main()
 {
-  ivec2 uv = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 uv = ivec2(gl_GlobalInvocationID.xy);
 
-  if (uv.x >= int(pc.iResolution.x) || uv.y >= int(pc.iResolution.y))
-    return;
+    if (uv.x >= int(pc.iResolution.x) || uv.y >= int(pc.iResolution.y))
+        return;
 
-  // If your image looks upside-down, uncomment the next line:
-  // uv.y = int(pc.iResolution.y) - 1 - uv.y;
+    vec4 color;
+    mainImage(color, vec2(uv) + vec2(0.5));
 
-  vec4 color;
-  mainImage(color, vec2(uv) + vec2(0.5));
-
-  imageStore(resultImage, uv, color);
+    imageStore(resultImage, uv, color);
 }
