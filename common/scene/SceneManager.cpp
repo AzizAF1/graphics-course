@@ -411,3 +411,164 @@ etna::VertexByteStreamFormatDescription SceneManager::getVertexFormatDescription
       },
     }};
 }
+
+etna::VertexByteStreamFormatDescription SceneManager::getBakedVertexFormatDescription()
+{
+  return etna::VertexByteStreamFormatDescription{
+    .stride = 32,
+    .attributes = {
+      // location 0: POSITION (float3)
+      etna::VertexByteStreamFormatDescription::Attribute{
+        .format = vk::Format::eR32G32B32Sfloat,
+        .offset = 0,
+      },
+      // location 1: NORMAL (u8x4 UNORM) at offset 12 (we ignore W)
+      etna::VertexByteStreamFormatDescription::Attribute{
+        .format = vk::Format::eR8G8B8A8Unorm,
+        .offset = 12,
+      },
+      // location 2: TEXCOORD_0 (float2)
+      etna::VertexByteStreamFormatDescription::Attribute{
+        .format = vk::Format::eR32G32Sfloat,
+        .offset = 16,
+      },
+      // location 3: TANGENT (u8x4 UNORM) at offset 24 (xyz + w byte=1)
+      etna::VertexByteStreamFormatDescription::Attribute{
+        .format = vk::Format::eR8G8B8A8Unorm,
+        .offset = 24,
+      },
+    }};
+}
+
+void SceneManager::selectSceneBaked(std::filesystem::path path)
+{
+  auto maybeModel = loadModel(path);
+  if (!maybeModel.has_value())
+    return;
+  auto model = std::move(*maybeModel);
+
+  // Instances (same as slow path)
+  auto [instMats, instMeshes] = processInstances(model);
+  instanceMatrices = std::move(instMats);
+  instanceMeshes = std::move(instMeshes);
+
+  // Find baked vertex + index bufferViews
+  int vBvIdx = -1;
+  int iBvIdx = -1;
+
+  for (int i = 0; i < (int)model.bufferViews.size(); ++i)
+  {
+    const auto& bv = model.bufferViews[i];
+
+    if (bv.target == TINYGLTF_TARGET_ARRAY_BUFFER && bv.byteStride == 32 && vBvIdx < 0)
+      vBvIdx = i;
+
+    if (bv.target == TINYGLTF_TARGET_ELEMENT_ARRAY_BUFFER && iBvIdx < 0)
+      iBvIdx = i;
+  }
+
+  ETNA_VERIFY(vBvIdx >= 0 && iBvIdx >= 0);
+
+  const auto& vbv = model.bufferViews[vBvIdx];
+  const auto& ibv = model.bufferViews[iBvIdx];
+
+  ETNA_VERIFY(vbv.buffer == ibv.buffer);
+
+  // Basic alignment expectations
+  ETNA_VERIFY((vbv.byteOffset % 4) == 0);
+  ETNA_VERIFY((ibv.byteOffset % 4) == 0);
+
+  const auto& buf = model.buffers[vbv.buffer];
+
+  const std::byte* vBytes =
+    reinterpret_cast<const std::byte*>(buf.data.data()) + vbv.byteOffset;
+  const std::byte* iBytes =
+    reinterpret_cast<const std::byte*>(buf.data.data()) + ibv.byteOffset;
+
+  const size_t vSize = vbv.byteLength;
+  const size_t iSize = ibv.byteLength;
+
+  ETNA_VERIFY((vSize % 32) == 0);
+  ETNA_VERIFY((iSize % 4) == 0);
+
+  // Build renderElements + meshes (no CPU repack)
+  renderElements.clear();
+  meshes.clear();
+
+  {
+    size_t totalPrims = 0;
+    for (const auto& m : model.meshes)
+      totalPrims += m.primitives.size();
+    renderElements.reserve(totalPrims);
+    meshes.reserve(model.meshes.size());
+  }
+
+  for (const auto& mesh : model.meshes)
+  {
+    meshes.push_back(Mesh{
+      .firstRelem = static_cast<std::uint32_t>(renderElements.size()),
+      .relemCount = 0,
+    });
+
+    for (const auto& prim : mesh.primitives)
+    {
+      if (prim.mode != TINYGLTF_MODE_TRIANGLES)
+        continue;
+      if (prim.indices < 0)
+        continue;
+
+      const auto posIt = prim.attributes.find("POSITION");
+      ETNA_VERIFY(posIt != prim.attributes.end());
+
+      const auto& accPos = model.accessors[posIt->second];
+      const auto& accIdx = model.accessors[prim.indices];
+
+      // Hard asserts for baked format:
+      ETNA_VERIFY(accPos.type == TINYGLTF_TYPE_VEC3);
+      ETNA_VERIFY(accPos.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT);
+      ETNA_VERIFY(accPos.bufferView == vBvIdx);
+
+      ETNA_VERIFY(accIdx.type == TINYGLTF_TYPE_SCALAR);
+      ETNA_VERIFY(accIdx.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT);
+      ETNA_VERIFY(accIdx.bufferView == iBvIdx);
+
+      ETNA_VERIFY((accPos.byteOffset % 32) == 0);
+      ETNA_VERIFY((accIdx.byteOffset % 4) == 0);
+
+      const uint32_t vertexOffset = uint32_t(accPos.byteOffset / 32);
+      const uint32_t indexOffset  = uint32_t(accIdx.byteOffset / 4);
+      const uint32_t indexCount   = uint32_t(accIdx.count);
+
+      renderElements.push_back(RenderElement{
+        .vertexOffset = vertexOffset,
+        .indexOffset  = indexOffset,
+        .indexCount   = indexCount,
+      });
+
+      meshes.back().relemCount++;
+    }
+  }
+
+  // Upload directly
+  unifiedVbuf = etna::get_context().createBuffer(etna::Buffer::CreateInfo{
+    .size = vSize,
+    .bufferUsage = vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eVertexBuffer,
+    .memoryUsage = VMA_MEMORY_USAGE_GPU_ONLY,
+    .name = "bakedVbuf",
+  });
+
+  unifiedIbuf = etna::get_context().createBuffer(etna::Buffer::CreateInfo{
+    .size = iSize,
+    .bufferUsage = vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eIndexBuffer,
+    .memoryUsage = VMA_MEMORY_USAGE_GPU_ONLY,
+    .name = "bakedIbuf",
+  });
+
+  transferHelper.uploadBuffer<std::byte>(*oneShotCommands, unifiedVbuf, 0, std::span(vBytes, vSize));
+
+  transferHelper.uploadBuffer<std::uint32_t>(
+    *oneShotCommands,
+    unifiedIbuf,
+    0,
+    std::span(reinterpret_cast<const std::uint32_t*>(iBytes), iSize / 4));
+}

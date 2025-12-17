@@ -1,12 +1,16 @@
 #version 450
 #extension GL_ARB_separate_shader_objects : enable
-#extension GL_GOOGLE_include_directive : require
 
-#include "unpack_attributes.glsl"
+// BAKED layout (stride 32):
+// loc0: vec3 position  (R32G32B32_SFLOAT) offset 0
+// loc1: vec4 normal    (R8G8B8A8_UNORM)   offset 12  (xyz used)
+// loc2: vec2 uv        (R32G32_SFLOAT)    offset 16
+// loc3: vec4 tangent   (R8G8B8A8_UNORM)   offset 24  (xyz used, w ignored)
 
-
-layout(location = 0) in vec4 vPosNorm;
-layout(location = 1) in vec4 vTexCoordAndTang;
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec4 aNormU8;
+layout(location = 2) in vec2 aUV;
+layout(location = 3) in vec4 aTangU8;
 
 layout(push_constant) uniform params_t
 {
@@ -14,8 +18,7 @@ layout(push_constant) uniform params_t
   mat4 mModel;
 } params;
 
-
-layout (location = 0 ) out VS_OUT
+layout(location = 0) out VS_OUT
 {
   vec3 wPos;
   vec3 wNorm;
@@ -25,15 +28,26 @@ layout (location = 0 ) out VS_OUT
 
 out gl_PerVertex { vec4 gl_Position; };
 
-void main(void)
+vec3 decode_u8_unorm_to_snorm(vec3 u)
 {
-  const vec4 wNorm = vec4(decode_normal(floatBitsToInt(vPosNorm.w)),     0.0f);
-  const vec4 wTang = vec4(decode_normal(floatBitsToInt(vTexCoordAndTang.z)), 0.0f);
+  // UNORM gives [0..1] where value = byte/255.
+  // Your baker encodes snorm [-1..1] as round(255 * 0.5*(x+1)).
+  // So decode is x = u*2 - 1.
+  return u * 2.0 - 1.0;
+}
 
-  vOut.wPos   = (params.mModel * vec4(vPosNorm.xyz, 1.0f)).xyz;
-  vOut.wNorm  = normalize(mat3(transpose(inverse(params.mModel))) * wNorm.xyz);
-  vOut.wTangent = normalize(mat3(transpose(inverse(params.mModel))) * wTang.xyz);
-  vOut.texCoord = vTexCoordAndTang.xy;
+void main()
+{
+  vec3 n_obj = normalize(decode_u8_unorm_to_snorm(aNormU8.xyz));
+  vec3 t_obj = normalize(decode_u8_unorm_to_snorm(aTangU8.xyz));
 
-  gl_Position   = params.mProjView * vec4(vOut.wPos, 1.0);
+  vec3 wPos = (params.mModel * vec4(aPos, 1.0)).xyz;
+
+  mat3 nrmMat = mat3(transpose(inverse(params.mModel)));
+  vOut.wPos     = wPos;
+  vOut.wNorm    = normalize(nrmMat * n_obj);
+  vOut.wTangent = normalize(nrmMat * t_obj);
+  vOut.texCoord = aUV;
+
+  gl_Position = params.mProjView * vec4(wPos, 1.0);
 }
