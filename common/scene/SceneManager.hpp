@@ -36,6 +36,14 @@ public:
 
   void selectScene(std::filesystem::path path);
 
+    // New baked loader (does not break old selectScene)
+  void selectSceneBaked(std::filesystem::path path);
+
+  // Vertex format for baked vertex layout (32 bytes):
+  // pos(float3) + normal(u8x4) + uv(float2) + tangent(u8x4)
+  etna::VertexByteStreamFormatDescription getBakedVertexFormatDescription();
+
+
   // Every instance is a mesh drawn with a certain transform
   // NOTE: maybe you can pass some additional data through unused matrix entries?
   std::span<const glm::mat4x4> getInstanceMatrices() { return instanceMatrices; }

@@ -7,3 +7,7 @@ external
 .vscode
 CMakeSettings.json
 CMakeUserPresets.json
+.DS_Store
+**/.DS_Store
+.cpmcache/
+build/

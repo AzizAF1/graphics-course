@@ -28,7 +28,7 @@ void WorldRenderer::allocateResources(glm::uvec2 swapchain_resolution)
 
 void WorldRenderer::loadScene(std::filesystem::path path)
 {
-  sceneMgr->selectScene(path);
+  sceneMgr->selectSceneBaked(path);
 }
 
 void WorldRenderer::loadShaders()
@@ -44,7 +44,7 @@ void WorldRenderer::setupPipelines(vk::Format swapchain_format)
 {
   etna::VertexShaderInputDescription sceneVertexInputDesc{
     .bindings = {etna::VertexShaderInputDescription::Binding{
-      .byteStreamDescription = sceneMgr->getVertexFormatDescription(),
+      .byteStreamDescription = sceneMgr->getBakedVertexFormatDescription(),
     }},
   };
 
@@ -69,6 +69,9 @@ void WorldRenderer::setupPipelines(vk::Format swapchain_format)
         },
     });
 }
+
+
+
 
 void WorldRenderer::debugInput(const Keyboard&) {}
 
@@ -137,3 +140,5 @@ void WorldRenderer::renderWorld(
     renderScene(cmd_buf, worldViewProj, staticMeshPipeline.getVkPipelineLayout());
   }
 }
+
+
